@@ -220,21 +220,28 @@ setup = (env) ->
         # render content
         content = generatorLookup[uri] or lookup[uri]
         if content?
+          pluginName = content.constructor.name
           renderView env, content, locals, tree, templates, (error, result) ->
-            if error then callback error
+            if error then callback error, 500, pluginName
             else if result?
+              mimeType = mime.lookup content.filename
+              charset = mime.charsets.lookup mimeType
+              if charset
+                contentType = "#{ mimeType }; charset=#{ charset }"
+              else
+                contentType = mimeType
               if result instanceof Stream
-                response.writeHead 200, 'Content-Type': mime.lookup(content.filename)
-                pump result, response, (error) -> callback error, 200
+                response.writeHead 200, 'Content-Type': contentType
+                pump result, response, (error) -> callback error, 200, pluginName
               else if result instanceof Buffer
-                response.writeHead 200, 'Content-Type': mime.lookup(content.filename)
+                response.writeHead 200, 'Content-Type': contentType
                 response.write result
                 response.end()
-                callback null, 200
+                callback null, 200, pluginName
               else
                 callback new Error "View for content '#{ res.filename }' returned invalid response. Expected Buffer or Stream."
             else
-              callback() # not handled, no data from plugin
+              callback null, 404, pluginName # not handled, no data from plugin
         else
           callback() # not handled, no matching url
     ], callback
@@ -262,14 +269,17 @@ setup = (env) ->
       (callback) ->
         # finally pass the request to the contentHandler
         contentHandler request, response, callback
-    ], (error, responseCode) ->
+    ], (error, responseCode, pluginName) ->
       if error? or not responseCode?
         # request not handled or error
         responseCode = if error? then 500 else 404
         response.writeHead responseCode, 'Content-Type': 'text/plain'
         response.end if error? then error.message else '404 Not Found\n'
       delta = Date.now() - start
-      env.logger.info "#{ colorCode(responseCode) } #{ uri.bold } " + "#{ delta }ms".grey
+      logstr = "#{ colorCode(responseCode) } #{ uri.bold }"
+      logstr += " #{ pluginName }".grey if pluginName?
+      logstr += " #{ delta }ms".grey
+      env.logger.info logstr
       if error
         env.logger.error error.message, error
 
@@ -290,7 +300,7 @@ run = (env, callback) ->
   server = null
   handler = null
 
-  if env.config.__filename?
+  if env.config._restartOnConfChange and env.config.__filename?
     # watch config file and reload when changed
     env.logger.verbose "watching config file #{ env.config.__filename } for changes"
     configWatcher = chokidar.watch env.config.__filename
@@ -330,7 +340,7 @@ run = (env, callback) ->
           callback? error
           callback = null
         server.on 'listening', ->
-          callback?()
+          callback? null, server
           callback = null
         server.listen env.config.port, env.config.hostname
     ], callback
@@ -341,11 +351,11 @@ run = (env, callback) ->
 
   env.logger.verbose 'starting preview server'
 
-  start (error) ->
+  start (error, server) ->
     if not error?
       host = env.config.hostname or 'localhost'
       serverUrl = "http://#{ host }:#{ env.config.port }#{ env.config.baseUrl }".bold
       env.logger.info "server running on: #{ serverUrl }"
-    callback error
+    callback error, server
 
 module.exports = {run, setup}
